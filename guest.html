@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>早押しボタン</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+:root { --bg:#0d0d0f; --surface:#18181c; --border:#2a2a32; --accent:#f5c518; --text:#f0f0f0; --sub:#888; --font:'Hiragino Sans','Noto Sans JP',system-ui,sans-serif; }
+body { background:var(--bg); color:var(--text); font-family:var(--font); min-height:100dvh; display:flex; flex-direction:column; touch-action:manipulation; }
+.screen { display:none; flex-direction:column; height:100dvh; align-items:center; justify-content:center; padding:32px 24px; gap:24px; }
+.screen.active { display:flex; }
+.join-logo { font-size:52px; animation:pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.06)} }
+.join-title { font-size:26px; font-weight:800; color:var(--accent); }
+.name-input { width:100%; max-width:320px; background:var(--surface); border:1px solid var(--border); border-radius:14px; color:var(--text); font-family:var(--font); font-size:20px; font-weight:700; padding:16px 20px; outline:none; text-align:center; transition:border-color .15s; }
+.name-input:focus { border-color:var(--accent); }
+.name-input::placeholder { color:#444; font-weight:400; }
+.join-btn { width:100%; max-width:320px; padding:18px; background:var(--accent); color:#000; border:none; border-radius:14px; font-family:var(--font); font-size:18px; font-weight:800; cursor:pointer; }
+#game { padding:0; justify-content:stretch; }
+.game-top { flex-shrink:0; text-align:center; padding:24px 20px 16px; border-bottom:1px solid var(--border); }
+.my-name { font-size:16px; color:var(--sub); margin-bottom:4px; }
+.my-name strong { color:var(--text); font-weight:800; }
+.status-msg { font-size:18px; font-weight:700; transition:color .3s; }
+.status-msg.waiting { color:var(--sub); }
+.status-msg.open { color:#2dc653; }
+.status-msg.pressed { color:var(--accent); }
+.buzz-wrap { flex:1; display:flex; align-items:center; justify-content:center; padding:32px; }
+.buzz-btn { width:min(65vw,260px); height:min(65vw,260px); border-radius:50%; border:none; cursor:pointer; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; font-family:var(--font); color:#fff; position:relative; overflow:hidden; box-shadow:0 8px 40px rgba(0,0,0,.5); transition:transform .1s, filter .3s; user-select:none; }
+.buzz-btn:active { transform:scale(.94); }
+.buzz-label { font-size:22px; font-weight:900; }
+.buzz-rank { font-size:52px; line-height:1; display:none; animation:rankPop .4s cubic-bezier(.34,1.56,.64,1); }
+@keyframes rankPop { from{transform:scale(.3);opacity:0} to{transform:scale(1);opacity:1} }
+.buzz-rank-label { font-size:14px; font-weight:700; display:none; opacity:.8; }
+.buzz-btn.pressed .buzz-label { font-size:14px; opacity:.7; }
+.buzz-btn.pressed .buzz-rank { display:block; }
+.buzz-btn.pressed .buzz-rank-label { display:block; }
+.buzz-btn.waiting-phase { filter:brightness(.4) saturate(.3); pointer-events:none; }
+.rank-display { flex-shrink:0; border-top:1px solid var(--border); padding:16px 20px; display:flex; align-items:center; gap:12px; min-height:60px; }
+.rank-display.hidden { opacity:0; }
+.rank-num { font-size:32px; font-weight:900; }
+.rank-sub { font-size:14px; color:var(--sub); }
+.err-msg { font-size:14px; color:#e63946; }
+</style>
+</head>
+<body>
+<div id="join" class="screen active">
+  <div class="join-logo">⚡</div>
+  <div style="text-align:center">
+    <div class="join-title">早押しボタン</div>
+    <div style="font-size:14px;color:var(--sub);margin-top:4px">名前を入れて参加</div>
+  </div>
+  <input class="name-input" id="name-input" type="text" placeholder="あなたの名前" maxlength="10" autocomplete="off">
+  <button class="join-btn" id="join-btn">参加する →</button>
+  <div class="err-msg" id="err-msg" style="display:none">サーバーに接続できません</div>
+</div>
+<div id="game" class="screen">
+  <div class="game-top">
+    <div class="my-name">参加中: <strong id="my-name-display"></strong></div>
+    <div class="status-msg waiting" id="status-msg">ホストを待っています...</div>
+  </div>
+  <div class="buzz-wrap">
+    <button class="buzz-btn waiting-phase" id="buzz-btn" style="background:#444">
+      <div class="buzz-rank" id="buzz-rank"></div>
+      <div class="buzz-rank-label" id="buzz-rank-label"></div>
+      <div class="buzz-label" id="buzz-label">待機中</div>
+    </button>
+  </div>
+  <div class="rank-display hidden" id="rank-display">
+    <div class="rank-num" id="rank-num"></div>
+    <div class="rank-sub" id="rank-sub"></div>
+  </div>
+</div>
+<script>
+const MEDALS = ['🥇','🥈','🥉'];
+let myId = null, myColor = '#888', myName = '', hasPressed = false, ws = null;
+function genId() { return Math.random().toString(36).slice(2,10); }
+myId = sessionStorage.getItem('buzz-id') || genId();
+sessionStorage.setItem('buzz-id', myId);
+const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+function connect(onOpen) {
+  ws = new WebSocket(`${proto}://${location.host}`);
+  ws.addEventListener('open', onOpen);
+  ws.addEventListener('message', e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'joined') {
+      myColor = msg.color;
+      document.getElementById('buzz-btn').style.background = myColor;
+      document.getElementById('game').classList.add('active');
+      document.getElementById('join').classList.remove('active');
+      document.getElementById('my-name-display').textContent = myName;
+    }
+    if (msg.type === 'state') renderState(msg.state);
+  });
+  ws.addEventListener('close', () => { document.getElementById('err-msg').style.display = ''; });
+}
+document.getElementById('join-btn').addEventListener('click', doJoin);
+document.getElementById('name-input').addEventListener('keydown', e => { if(e.key==='Enter') doJoin(); });
+function doJoin() {
+  myName = document.getElementById('name-input').value.trim() || 'ゲスト';
+  connect(() => ws.send(JSON.stringify({ type:'join', id:myId, name:myName })));
+}
+document.getElementById('buzz-btn').addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (hasPressed) return;
+  ws.send(JSON.stringify({ type:'buzz', id:myId }));
+}, { passive:false });
+function renderState(state) {
+  const buzzBtn = document.getElementById('buzz-btn');
+  const statusMsg = document.getElementById('status-msg');
+  const buzzLabel = document.getElementById('buzz-label');
+  const buzzRank = document.getElementById('buzz-rank');
+  const buzzRankLabel = document.getElementById('buzz-rank-label');
+  const rankDisplay = document.getElementById('rank-display');
+  const myRankIdx = state.pressOrder.findIndex(p => p.id === myId);
+  const myRank = myRankIdx >= 0 ? myRankIdx + 1 : null;
+  hasPressed = myRank !== null;
+  if (state.phase === 'waiting') {
+    statusMsg.textContent = 'ホストを待っています...';
+    statusMsg.className = 'status-msg waiting';
+    buzzBtn.className = 'buzz-btn waiting-phase';
+    buzzLabel.textContent = '待機中';
+    buzzRank.style.display = 'none';
+    buzzRankLabel.style.display = 'none';
+    rankDisplay.className = 'rank-display hidden';
+    hasPressed = false;
+  } else if (state.phase === 'open') {
+    if (myRank) {
+      statusMsg.textContent = `${myRank}番目に押した！`;
+      statusMsg.className = 'status-msg pressed';
+      buzzBtn.className = 'buzz-btn pressed';
+      buzzBtn.style.background = myColor;
+      buzzRank.textContent = myRank <= 3 ? MEDALS[myRank-1] : `${myRank}位`;
+      buzzRankLabel.textContent = `${myRank}番目`;
+      rankDisplay.className = 'rank-display';
+      document.getElementById('rank-num').textContent = myRank <= 3 ? MEDALS[myRank-1] : `${myRank}位`;
+      document.getElementById('rank-sub').textContent = `${myRank}番目に押しました`;
+    } else {
+      statusMsg.textContent = '今すぐ押せ！';
+      statusMsg.className = 'status-msg open';
+      buzzBtn.className = 'buzz-btn';
+      buzzBtn.style.background = myColor;
+      buzzLabel.textContent = '押す！';
+      rankDisplay.className = 'rank-display hidden';
+    }
+  }
+}
+</script>
+</body>
+</html>
